@@ -119,6 +119,12 @@ export type PluginProgressEvent = {
   message: string;
 };
 
+export type SelectionNode = {
+  id: string;
+  name: string;
+  type: string;
+};
+
 export type PluginStatusMessage = {
   type: "plugin-status";
   payload: {
@@ -126,6 +132,7 @@ export type PluginStatusMessage = {
     fileName: string;
     pageName: string;
     selectionCount: number;
+    selection: SelectionNode[];
   };
 };
 

@@ -41,4 +41,5 @@ dev-watch:
 release: build
 	cp bin/za-talk-to-figma $(RELEASE_DIR)/za-talk-to-figma
 	cp plugin/dist/code.js $(RELEASE_DIR)/plugin/dist/code.js
+	cp plugin/dist/index.html $(RELEASE_DIR)/plugin/dist/index.html
 	@echo "Released to $(RELEASE_DIR)"

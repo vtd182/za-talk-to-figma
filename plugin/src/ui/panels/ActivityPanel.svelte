@@ -17,7 +17,12 @@
   <div class="activity-list">
     {#if activeRequests.length === 0}
       {#if compact}
-        <div class="empty-inline">Không có toolcall đang chạy</div>
+        <div class="empty-inline">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+        </svg>
+        <span>Chưa có tool call nào</span>
+      </div>
       {:else}
         <div class="empty-state">
           <div class="empty-title">Không có toolcall đang chạy</div>
@@ -197,12 +202,20 @@
   }
 
   .empty-inline {
-    min-height: 36px;
+    flex: 1;
     display: flex;
+    flex-direction: column;
     align-items: center;
-    padding: 8px 4px;
-    color: #64748b;
-    font-size: 12px;
+    justify-content: center;
+    gap: 7px;
+    padding: 24px 16px;
+    color: #94a3b8;
+    font-size: 11.5px;
+    text-align: center;
+  }
+
+  .empty-inline svg {
+    opacity: 0.5;
   }
 
   .empty-title {

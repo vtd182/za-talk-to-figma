@@ -52,13 +52,15 @@ const stableSessionId = (() => {
 const getSessionId = () => stableSessionId;
 
 const sendStatus = () => {
+  const sel = figma.currentPage.selection;
   const message: PluginStatusMessage = {
     type: "plugin-status",
     payload: {
       sessionId: getSessionId(),
       fileName: figma.root.name,
       pageName: figma.currentPage.name,
-      selectionCount: figma.currentPage.selection.length,
+      selectionCount: sel.length,
+      selection: sel.map((n) => ({ id: n.id, name: n.name, type: n.type })),
     },
   };
   postToUI(message);

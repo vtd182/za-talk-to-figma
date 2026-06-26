@@ -1,55 +1,36 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import ActivityPanel from "./panels/ActivityPanel.svelte";
-  import TimelinePanel from "./panels/TimelinePanel.svelte";
-  import DebugPanel from "./panels/DebugPanel.svelte";
   import SessionPanel from "./panels/SessionPanel.svelte";
-  import type { ActiveRequest, DebugEvent, SessionSummary, TimelineEvent } from "./model";
+  import type { ActiveRequest, SessionSummary } from "./model";
+
+  type SelectionNode = { id: string; name: string; type: string };
 
   let connected = false;
   let currentSessionId = "—";
   let fileName = "—";
   let pageName = "—";
   let selectionCount = 0;
+  let selection: SelectionNode[] = [];
   let knownSessions: SessionSummary[] = [];
   let catalogReady = false;
+  let showSessions = false;
+  let showSettings = false;
 
   let activeRequestMap: Record<string, ActiveRequest> = {};
-  let debugEvents: DebugEvent[] = [];
-  let timelineEvents: TimelineEvent[] = [];
-  let showDebug = false;
-  let showTimeline = false;
-  let showLogs = false;
-  let showSessions = false;
 
   $: activeRequests = Object.values(activeRequestMap).sort((a, b) => a.startedAt - b.startedAt);
   $: isWorking = activeRequests.length > 0;
   $: sessionCount = catalogReady ? knownSessions.length : 0;
-  $: activeSessionMeta =
-    knownSessions.find((session) => session.sessionId === currentSessionId) ??
-    ({ sessionId: currentSessionId, fileName, pageName, selectionCount } as SessionSummary);
-  $: defaultRouteLabel =
-    catalogReady && activeSessionMeta?.fileName
-      ? `Default route -> ${activeSessionMeta.fileName}`
-      : "Default route chưa được xác nhận";
   $: adminURL = `http://${serverHost}:${serverPort}/admin`;
-  $: statusLabel = connected ? (isWorking ? "Đang điều phối" : "Sẵn sàng") : "Mất kết nối";
-  $: activitySummary = isWorking
-    ? `${activeRequests.length} capability đang chạy`
-    : connected
-      ? "Đang chờ toolcall"
-      : "Chờ kết nối plugin";
+  $: statusLabel = connected ? (isWorking ? "Working" : "Ready") : "Disconnected";
 
   let serverHost = "127.0.0.1";
   let serverPort = "1802";
-
-  let showSettings = false;
   let editHost = serverHost;
   let editPort = serverPort;
 
   const RECONNECT_DELAY_MS = 1500;
-  const MAX_DEBUG_EVENTS = 36;
-  const MAX_TIMELINE_EVENTS = 16;
   const REQUEST_SETTLE_DELAY_MS = 900;
 
   let socket: WebSocket | null = null;
@@ -58,159 +39,67 @@
   let configLoaded = false;
   const cleanupTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
-  const reassignRequests = () => {
-    activeRequestMap = { ...activeRequestMap };
-  };
-
-  const addDebugEvent = (
-    tone: DebugEvent["tone"],
-    tool: string,
-    stage: string,
-    message: string,
-    requestId?: string,
-  ) => {
-    const now = new Date();
-    debugEvents = [
-      ...debugEvents,
-      {
-        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        tone,
-        tool,
-        stage,
-        requestId,
-        message,
-        timestamp: now.toLocaleTimeString(),
-      },
-    ].slice(-MAX_DEBUG_EVENTS);
-  };
+  const reassignRequests = () => { activeRequestMap = { ...activeRequestMap }; };
 
   const clearCleanupTimer = (requestId: string) => {
     const timer = cleanupTimers.get(requestId);
-    if (timer) {
-      clearTimeout(timer);
-      cleanupTimers.delete(requestId);
-    }
-  };
-
-  const pushTimelineEvent = (
-    tool: string,
-    requestId: string,
-    status: TimelineEvent["status"],
-    message: string,
-    durationMs: number,
-    sessionId?: string,
-  ) => {
-    const now = new Date();
-    timelineEvents = [
-      {
-        id: `${requestId}-${Date.now()}`,
-        tool,
-        requestId,
-        status,
-        message,
-        durationMs,
-        timestamp: now.toLocaleTimeString(),
-        sessionId,
-      },
-      ...timelineEvents.filter((item) => item.requestId !== requestId),
-    ].slice(0, MAX_TIMELINE_EVENTS);
+    if (timer) { clearTimeout(timer); cleanupTimers.delete(requestId); }
   };
 
   const scheduleFinishRequest = (requestId: string) => {
     clearCleanupTimer(requestId);
-    cleanupTimers.set(
-      requestId,
-      setTimeout(() => {
-        delete activeRequestMap[requestId];
-        cleanupTimers.delete(requestId);
-        reassignRequests();
-      }, REQUEST_SETTLE_DELAY_MS),
-    );
+    cleanupTimers.set(requestId, setTimeout(() => {
+      delete activeRequestMap[requestId];
+      cleanupTimers.delete(requestId);
+      reassignRequests();
+    }, REQUEST_SETTLE_DELAY_MS));
   };
 
   const ensureActiveRequest = (requestId: string, tool: string) => {
     if (!activeRequestMap[requestId]) {
       activeRequestMap[requestId] = {
-        requestId,
-        tool,
-        stage: "queued",
-        progress: 0,
-        message: "Runtime đã nhận toolcall",
+        requestId, tool,
+        stage: "queued", progress: 0,
+        message: "Queued",
         startedAt: Date.now(),
-        lastDebugMessage: "",
-        lastDebugProgress: -1,
+        lastDebugMessage: "", lastDebugProgress: -1,
       };
       reassignRequests();
     }
     return activeRequestMap[requestId];
   };
 
-  const maybeLogProgress = (entry: ActiveRequest, message: string, progress: number) => {
-    const crossedThreshold =
-      entry.lastDebugProgress < 0 || Math.abs(progress - entry.lastDebugProgress) >= 10;
-    const messageChanged = message !== entry.lastDebugMessage;
-    if (!crossedThreshold && !messageChanged) return;
-    entry.lastDebugProgress = progress;
-    entry.lastDebugMessage = message;
-    addDebugEvent("info", entry.tool, "progress", message, entry.requestId);
-  };
-
   const requestSessionCatalog = () => {
     if (socket?.readyState !== WebSocket.OPEN) return;
-    addDebugEvent("info", "runtime", "catalog-request", "Requesting session catalog from bridge");
     socket.send(JSON.stringify({ type: "session_request_catalog" }));
   };
 
   const openAdmin = () => {
-    const url = adminURL;
-    addDebugEvent("info", "runtime", "open-admin", `Opening ${url}`);
-    parent.postMessage({ pluginMessage: { type: "open_external", url } }, "*");
-  };
-
-  const copyAdminURL = async () => {
-    try {
-      await navigator.clipboard.writeText(adminURL);
-      addDebugEvent("success", "runtime", "copy-admin-url", `Copied ${adminURL}`);
-    } catch {
-      addDebugEvent("warn", "runtime", "copy-admin-url", `Could not copy ${adminURL}`);
-    }
+    parent.postMessage({ pluginMessage: { type: "open_external", url: adminURL } }, "*");
   };
 
   const switchSession = (sessionId: string) => {
     if (!sessionId || sessionId === currentSessionId || socket?.readyState !== WebSocket.OPEN) return;
-    addDebugEvent("info", "runtime", "session-switch", `Switching active session to ${sessionId}`);
     socket.send(JSON.stringify({ type: "session_switch", sessionId }));
   };
 
   const switchSessionAndTest = (sessionId: string) => {
     if (!sessionId || socket?.readyState !== WebSocket.OPEN) return;
     switchSession(sessionId);
-    addDebugEvent("info", "runtime", "route-test", `Switching and probing ${sessionId}`);
-    setTimeout(() => {
-      requestSessionCatalog();
-    }, 240);
+    setTimeout(requestSessionCatalog, 240);
   };
 
   const announceSession = () => {
     if (socket?.readyState !== WebSocket.OPEN || currentSessionId === "—") return;
-    addDebugEvent("info", "runtime", "session-announce", `Announcing ${currentSessionId}`);
-    socket.send(
-      JSON.stringify({
-        type: "session_announce",
-        sessionId: currentSessionId,
-        fileName,
-        pageName,
-        selectionCount,
-      }),
-    );
+    socket.send(JSON.stringify({
+      type: "session_announce",
+      sessionId: currentSessionId, fileName, pageName, selectionCount,
+    }));
     requestSessionCatalog();
   };
 
   const stopSessionRetry = () => {
-    if (sessionRetryTimer !== null) {
-      clearTimeout(sessionRetryTimer);
-      sessionRetryTimer = null;
-    }
+    if (sessionRetryTimer !== null) { clearTimeout(sessionRetryTimer); sessionRetryTimer = null; }
   };
 
   const scheduleSessionRetry = () => {
@@ -218,24 +107,17 @@
     if (catalogReady || socket?.readyState !== WebSocket.OPEN || currentSessionId === "—") return;
     sessionRetryTimer = setTimeout(() => {
       sessionRetryTimer = null;
-      if (!catalogReady) {
-        announceSession();
-        scheduleSessionRetry();
-      }
+      if (!catalogReady) { announceSession(); scheduleSessionRetry(); }
     }, 1800);
   };
 
   function connect() {
-    if (socket) {
-      socket.onclose = null;
-      socket.close();
-    }
+    if (socket) { socket.onclose = null; socket.close(); }
     const ws = new WebSocket(`ws://${serverHost}:${serverPort}/ws`);
     socket = ws;
 
     ws.onopen = () => {
       connected = true;
-      addDebugEvent("success", "bridge", "connected", `Connected to ${serverHost}:${serverPort}`);
       parent.postMessage({ pluginMessage: { type: "ui-ready" } }, "*");
       announceSession();
       requestSessionCatalog();
@@ -244,27 +126,16 @@
 
     ws.onclose = () => {
       if (socket !== ws) return;
-      connected = false;
-      socket = null;
-      catalogReady = false;
-      knownSessions = [];
+      connected = false; socket = null; catalogReady = false; knownSessions = [];
       stopSessionRetry();
       activeRequestMap = {};
-      cleanupTimers.forEach((timer) => clearTimeout(timer));
-      cleanupTimers.clear();
-      addDebugEvent("warn", "bridge", "disconnected", `Disconnected from ${serverHost}:${serverPort}`);
+      cleanupTimers.forEach((t) => clearTimeout(t)); cleanupTimers.clear();
       if (reconnectTimer === null) {
-        reconnectTimer = setTimeout(() => {
-          reconnectTimer = null;
-          connect();
-        }, RECONNECT_DELAY_MS);
+        reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(); }, RECONNECT_DELAY_MS);
       }
     };
 
-    ws.onerror = () => {
-      connected = false;
-      addDebugEvent("error", "bridge", "socket-error", `Socket error at ${serverHost}:${serverPort}`);
-    };
+    ws.onerror = () => { connected = false; };
 
     ws.onmessage = (event) => {
       try {
@@ -275,68 +146,21 @@
           const sessions = Array.isArray(payload.data?.sessions) ? payload.data.sessions : [];
           catalogReady = true;
           stopSessionRetry();
-          addDebugEvent(
-            "success",
-            "runtime",
-            "catalog-received",
-            `Bridge returned ${sessions.length} session(s)`,
-          );
           currentSessionId = active;
           knownSessions = sessions
-            .map((session: any) => ({
-              sessionId: session.sessionId,
-              fileName: session.fileName ?? "Untitled file",
-              pageName: session.pageName ?? "Unknown page",
-              selectionCount: session.selectionCount ?? 0,
+            .map((s: any) => ({
+              sessionId: s.sessionId,
+              fileName: s.fileName ?? "Untitled file",
+              pageName: s.pageName ?? "Unknown page",
+              selectionCount: s.selectionCount ?? 0,
             }))
-            .sort((a, b) => a.fileName.localeCompare(b.fileName));
-          const resolvedActive = sessions.find((session: any) => session.sessionId === active);
-          if (resolvedActive?.fileName) {
-            addDebugEvent(
-              "success",
-              "runtime",
-              "default-route",
-              `Default route -> ${resolvedActive.fileName}`,
-            );
-          }
+            .sort((a: SessionSummary, b: SessionSummary) => a.fileName.localeCompare(b.fileName));
           return;
         }
 
-        if (payload.type === "execution_report") {
-          const report = payload.data ?? {};
-          const capability = report.capability ?? "tool";
-          const requestId = payload.requestId ?? report.requestId ?? `exec-${Date.now()}`;
-          const durationMs = Number(report.durationMs ?? 0);
-          const resultClass = report.resultClass ?? "complete";
-          const fallbackUsed = !!report.fallbackUsed;
-          const attempts = Array.isArray(report.attempts) ? report.attempts.length : 0;
-          const fallbackPath = Array.isArray(report.fallbackPath) ? report.fallbackPath.join(" → ") : "";
-          const status: TimelineEvent["status"] =
-            resultClass === "failed" ? "error" : fallbackUsed || resultClass === "partial" || resultClass === "fallback" ? "warn" : "success";
-          const message = fallbackPath
-            ? `${resultClass} · ${attempts} attempt(s) · ${fallbackPath}`
-            : fallbackUsed
-              ? `${resultClass} · ${attempts} attempt(s) · fallback`
-              : `${resultClass} · ${attempts} attempt(s)`;
-          pushTimelineEvent(capability, requestId, status, message, durationMs, payload.sessionId);
-          addDebugEvent(
-            status === "error" ? "error" : status === "warn" ? "warn" : "success",
-            capability,
-            "execution-report",
-            message,
-            requestId,
-          );
-          return;
-        }
-
-        if (payload.requestId) {
-          ensureActiveRequest(payload.requestId, payload.type ?? "tool");
-          addDebugEvent("info", payload.type ?? "tool", "received", "Server request received", payload.requestId);
-        }
+        if (payload.requestId) ensureActiveRequest(payload.requestId, payload.type ?? "tool");
         parent.postMessage({ pluginMessage: { type: "server-request", payload } }, "*");
-      } catch {
-        addDebugEvent("warn", "bridge", "malformed", "Ignored malformed frame from server");
-      }
+      } catch { /* malformed frame */ }
     };
   }
 
@@ -347,10 +171,7 @@
     if (msg.type === "ws_config") {
       serverHost = msg.host ?? "127.0.0.1";
       serverPort = msg.port ?? "1802";
-      if (!configLoaded) {
-        configLoaded = true;
-        connect();
-      }
+      if (!configLoaded) { configLoaded = true; connect(); }
       return;
     }
 
@@ -359,6 +180,7 @@
       fileName = msg.payload.fileName;
       pageName = msg.payload.pageName ?? "—";
       selectionCount = msg.payload.selectionCount;
+      selection = msg.payload.selection ?? [];
       announceSession();
       scheduleSessionRetry();
       return;
@@ -373,19 +195,14 @@
         const entry = ensureActiveRequest(requestId, tool);
         entry.stage = msg.stage;
         if (msg.stage === "start") {
-          entry.message = "Plugin bắt đầu xử lý";
-          addDebugEvent("info", tool, "start", "Plugin started handling request", requestId);
+          entry.message = "Running";
         } else if (msg.stage === "success") {
           entry.progress = 100;
-          entry.message = `Hoàn tất trong ${payload.durationMs ?? 0} ms`;
-          addDebugEvent("success", tool, "success", entry.message, requestId);
-          pushTimelineEvent(tool, requestId, "success", entry.message, Number(payload.durationMs ?? 0), currentSessionId);
+          entry.message = `Done · ${payload.durationMs ?? 0} ms`;
           scheduleFinishRequest(requestId);
         } else if (msg.stage === "error") {
           entry.progress = 100;
-          entry.message = payload.error ?? "Plugin request failed";
-          addDebugEvent("error", tool, "error", entry.message, requestId);
-          pushTimelineEvent(tool, requestId, "error", entry.message, Number(payload.durationMs ?? 0), currentSessionId);
+          entry.message = payload.error ?? "Error";
           scheduleFinishRequest(requestId);
         }
         reassignRequests();
@@ -398,12 +215,9 @@
       const entry = ensureActiveRequest(msg.requestId, activeRequestMap[msg.requestId]?.tool ?? "tool");
       entry.stage = "progress";
       entry.progress = typeof msg.progress === "number" ? msg.progress : entry.progress;
-      entry.message = msg.message ?? "Đang xử lý";
-      maybeLogProgress(entry, entry.message, entry.progress);
+      entry.message = msg.message ?? "Running";
       reassignRequests();
-      if (socket?.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify(msg));
-      }
+      if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(msg));
       return;
     }
 
@@ -415,36 +229,42 @@
         const entry = ensureActiveRequest(requestId, tool);
         entry.progress = 100;
         entry.stage = msg.error ? "error" : "done";
-        entry.message = msg.error ? msg.error : "Đã phản hồi về server";
-        addDebugEvent(msg.error ? "error" : "success", tool, entry.stage, entry.message, requestId);
+        entry.message = msg.error ? msg.error : "Done";
         reassignRequests();
         scheduleFinishRequest(requestId);
       }
-      if (socket?.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify(msg));
-      }
+      if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(msg));
     }
   }
 
-  function openSettings() {
-    editHost = serverHost;
-    editPort = serverPort;
-    showSettings = true;
+  function typeLabel(type: string): string {
+    const map: Record<string, string> = {
+      FRAME: "F", COMPONENT: "C", COMPONENT_SET: "CS", INSTANCE: "I",
+      GROUP: "G", TEXT: "T", RECTANGLE: "R", ELLIPSE: "E",
+      VECTOR: "V", LINE: "L", SECTION: "S", BOOLEAN_OPERATION: "B",
+      POLYGON: "P", STAR: "★",
+    };
+    return map[type] ?? type.charAt(0);
   }
+
+  function typeAccent(type: string): string {
+    if (type === "FRAME" || type === "SECTION") return "#0068FF";
+    if (type === "COMPONENT" || type === "COMPONENT_SET") return "#8E45FF";
+    if (type === "INSTANCE") return "#18BDF5";
+    if (type === "TEXT") return "#FF5A3F";
+    if (type === "GROUP") return "#64748b";
+    return "#13C98B";
+  }
+
+  function openSettings() { editHost = serverHost; editPort = serverPort; showSettings = true; }
 
   function applySettings() {
     serverHost = editHost.trim() || "127.0.0.1";
     const parsed = parseInt(editPort, 10);
     serverPort = parsed > 0 && parsed <= 65535 ? String(parsed) : "1802";
-    parent.postMessage(
-      { pluginMessage: { type: "save_ws_config", host: serverHost, port: serverPort } },
-      "*",
-    );
+    parent.postMessage({ pluginMessage: { type: "save_ws_config", host: serverHost, port: serverPort } }, "*");
     showSettings = false;
-    if (reconnectTimer !== null) {
-      clearTimeout(reconnectTimer);
-      reconnectTimer = null;
-    }
+    if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     connect();
   }
 
@@ -456,115 +276,136 @@
   onMount(() => {
     window.addEventListener("message", handleMessage);
     parent.postMessage({ pluginMessage: { type: "get_ws_config" } }, "*");
-
-    const fallback = setTimeout(() => {
-      if (!configLoaded) {
-        configLoaded = true;
-        connect();
-      }
-    }, 500);
-
+    const fallback = setTimeout(() => { if (!configLoaded) { configLoaded = true; connect(); } }, 500);
     return () => {
       clearTimeout(fallback);
       window.removeEventListener("message", handleMessage);
       if (reconnectTimer !== null) clearTimeout(reconnectTimer);
       stopSessionRetry();
-      cleanupTimers.forEach((timer) => clearTimeout(timer));
-      cleanupTimers.clear();
+      cleanupTimers.forEach((t) => clearTimeout(t)); cleanupTimers.clear();
       if (socket) socket.close();
     };
   });
 </script>
 
 <div class="shell">
-  <section class="console-bar">
-    <div class="console-title-row">
-      <div class="console-title">
-        <div class="eyebrow">Za-talk-to-figma Runtime</div>
-        <h1>Runtime Console</h1>
+
+  <!-- ── HEADER ── -->
+  <section class="header-card">
+    <div class="top-row">
+      <div class="brand">
+        <div class="brand-logo">
+          <svg width="28" height="28" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <linearGradient id="zf-bg" x1="128" y1="72" x2="896" y2="952" gradientUnits="userSpaceOnUse">
+                <stop offset="0" stop-color="#F7FCFF"/><stop offset="1" stop-color="#EAF6FF"/>
+              </linearGradient>
+              <filter id="zf-sh" x="120" y="160" width="800" height="700" filterUnits="userSpaceOnUse">
+                <feDropShadow dx="0" dy="20" stdDeviation="28" flood-color="#0068FF" flood-opacity="0.18"/>
+              </filter>
+              <filter id="zf-ch" x="580" y="290" width="320" height="380" filterUnits="userSpaceOnUse">
+                <feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#0B2250" flood-opacity="0.13"/>
+              </filter>
+            </defs>
+            <rect x="64" y="64" width="896" height="896" rx="212" fill="url(#zf-bg)"/>
+            <rect x="64" y="64" width="896" height="896" rx="212" stroke="#D9F0FF" stroke-width="8"/>
+            <g filter="url(#zf-sh)">
+              <path d="M230 255L600 255L600 341L350 599L600 599L600 685L230 685L230 599L480 341L230 341Z" fill="#0068FF" stroke="#0068FF" stroke-width="6" stroke-linejoin="round"/>
+              <circle cx="375" cy="642" r="12" fill="white" fill-opacity="0.92"/>
+              <circle cx="415" cy="642" r="12" fill="white" fill-opacity="0.92"/>
+              <circle cx="455" cy="642" r="12" fill="white" fill-opacity="0.92"/>
+            </g>
+            <g filter="url(#zf-ch)">
+              <rect x="640" y="340" width="172" height="86" rx="43" fill="#FF5A3F"/>
+              <rect x="640" y="426" width="86" height="86" rx="43" fill="#8E45FF"/>
+              <rect x="726" y="426" width="86" height="86" rx="43" fill="#18BDF5"/>
+              <rect x="640" y="512" width="86" height="86" rx="43" fill="#13C98B"/>
+              <rect x="726" y="512" width="86" height="86" rx="43" fill="#0077FF" fill-opacity="0.10"/>
+            </g>
+          </svg>
+        </div>
+        <span class="brand-name">Runtime Console</span>
       </div>
-      <div class:status-pill={true} class:connected class:disconnected={!connected}>
-        <span class="status-dot"></span>
+      <div
+        class:status-pill={true}
+        class:connected
+        class:disconnected={!connected}
+        class:working={isWorking}
+      >
+        <span class="sdot"></span>
         <span>{statusLabel}</span>
       </div>
     </div>
-    <div class="console-status">
-      <div class="mini-stat">
-        <span>Sessions</span>
-        <strong>{sessionCount}</strong>
-      </div>
-      <div class="mini-stat">
-        <span>Sel</span>
-        <strong>{selectionCount}</strong>
-      </div>
-    </div>
-  </section>
 
-  <section class="route-strip">
-    <div class="route-block">
-      <div class="route-kv">
-        <span class="route-label">File</span>
-        <span class="route-name" title={fileName}>{fileName}</span>
+    <div class="info-rows">
+      <div class="info-row-1">
+        <span class="i-ep">{serverHost}:{serverPort}</span>
       </div>
-      <div class="route-kv">
-        <span class="route-label">Page</span>
-        <span class="route-page" title={pageName}>{pageName}</span>
-      </div>
-    </div>
-    <div class="route-block route-block-right">
-      <div class="route-kv">
-        <span class="route-label">Default route</span>
-        <span class="route-default" title={defaultRouteLabel}>{defaultRouteLabel}</span>
-      </div>
-      <div class="route-kv">
-        <span class="route-label">Active session</span>
-        <span class="route-active" title={activeSessionMeta.fileName}>
-          {activeSessionMeta.fileName} · {activeSessionMeta.pageName} · {activeSessionMeta.selectionCount ?? 0} sel
-        </span>
-      </div>
-    </div>
-  </section>
-
-  <section class="action-strip">
-    <button class="ghost-btn" on:click={requestSessionCatalog}>Refresh</button>
-    <button class="ghost-btn" on:click={() => (showSessions = true)}>
-      Sessions
-      <span class="inline-badge">{sessionCount}</span>
-    </button>
-    <button class="ghost-btn" on:click={() => (showLogs = true)}>
-      Logs
-      {#if timelineEvents.length + debugEvents.length > 0}
-        <span class="inline-badge">{timelineEvents.length + debugEvents.length}</span>
+      {#if fileName !== "—" || pageName !== "—"}
+        <div class="info-row-2">
+          {#if fileName !== "—"}
+            <span class="i-file" title={fileName}>{fileName}</span>
+          {/if}
+          {#if pageName !== "—"}
+            {#if fileName !== "—"}<span class="i-dot">·</span>{/if}
+            <span class="i-page" title={pageName}>{pageName}</span>
+          {/if}
+        </div>
       {/if}
-    </button>
-    <button class="ghost-btn" on:click={() => (showSettings = true)}>Endpoint</button>
-    <button class="primary-btn" on:click={openAdmin}>Open admin</button>
+    </div>
+
+    <div class="sel-row">
+      {#if selection.length === 0}
+        <span class="sel-empty">Nothing selected</span>
+      {:else}
+        {#each selection.slice(0, 3) as node (node.id)}
+          <span class="sel-chip" title="{node.type}: {node.name}">
+            <span class="sel-dot" style="background: {typeAccent(node.type)}"></span>
+            <span class="sel-name">{node.name}</span>
+          </span>
+        {/each}
+        {#if selection.length > 3}
+          <span class="sel-more">+{selection.length - 3}</span>
+        {/if}
+      {/if}
+    </div>
+
+    <div class="action-row">
+      <button class="btn icon" title="Refresh" on:click={requestSessionCatalog}>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M23 4v6h-6"/><path d="M1 20v-6h6"/>
+          <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/>
+          <path d="M20.49 15a9 9 0 0 1-14.85 3.36L1 14"/>
+        </svg>
+      </button>
+      <button class="btn" on:click={() => (showSessions = true)}>
+        Sessions{#if sessionCount > 0}&nbsp;<span class="badge">{sessionCount}</span>{/if}
+      </button>
+      <button class="btn icon" title="Settings" on:click={openSettings}>⚙</button>
+    </div>
   </section>
 
+  <!-- ── ACTIVITY ── -->
   <section class="activity-shell">
-    <div class="activity-shell-head">
-      <span>Tool Activity</span>
-      <span class="panel-badge">{activeRequests.length}</span>
+    <div class="act-head">
+      <span>Activity</span>
+      {#if activeRequests.length > 0}<span class="act-badge">{activeRequests.length}</span>{/if}
     </div>
     <ActivityPanel {activeRequests} showHeader={false} compact={true} />
   </section>
 
+  <!-- ── MODAL: Sessions ── -->
   {#if showSessions}
-    <div class="overlay" role="button" tabindex="0" on:click={() => (showSessions = false)} on:keydown={(event) => {
-      if (event.key === "Escape" || event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        showSessions = false;
-      }
-    }}>
-      <div class="modal-sheet modal-sheet-wide" role="dialog" aria-modal="true" aria-label="Runtime sessions" tabindex="-1" on:click|stopPropagation on:keydown|stopPropagation>
+    <div class="overlay" role="button" tabindex="0"
+      on:click={() => (showSessions = false)}
+      on:keydown={(e) => { if (e.key === "Escape") showSessions = false; }}>
+      <div class="modal" role="dialog" aria-modal="true" tabindex="-1"
+        on:click|stopPropagation on:keydown|stopPropagation>
         <div class="modal-head">
-          <div>
-            <div class="eyebrow">Route control</div>
-            <h2>Sessions</h2>
-          </div>
+          <span class="modal-title">Sessions</span>
           <div class="modal-actions">
-            <button class="ghost-btn" on:click={requestSessionCatalog}>Refresh</button>
-            <button class="primary-btn" on:click={() => (showSessions = false)}>Close</button>
+            <button class="btn" on:click={requestSessionCatalog}>Refresh</button>
+            <button class="btn primary" on:click={() => (showSessions = false)}>Close</button>
           </div>
         </div>
         <div class="modal-body">
@@ -579,36 +420,21 @@
     </div>
   {/if}
 
+  <!-- ── MODAL: Settings ── -->
   {#if showSettings}
-    <div class="overlay" role="button" tabindex="0" on:click={() => (showSettings = false)} on:keydown={(event) => {
-      if (event.key === "Escape" || event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        showSettings = false;
-      }
-    }}>
-      <div class="modal-sheet" role="dialog" aria-modal="true" aria-label="Endpoint settings" tabindex="-1" on:click|stopPropagation on:keydown|stopPropagation>
+    <div class="overlay" role="button" tabindex="0"
+      on:click={() => (showSettings = false)}
+      on:keydown={(e) => { if (e.key === "Escape") showSettings = false; }}>
+      <div class="modal" role="dialog" aria-modal="true" tabindex="-1"
+        on:click|stopPropagation on:keydown|stopPropagation>
         <div class="modal-head">
-          <div>
-            <div class="eyebrow">Bridge endpoint</div>
-            <h2>Endpoint</h2>
-          </div>
+          <span class="modal-title">Settings</span>
           <div class="modal-actions">
-            <button class="ghost-btn" on:click={copyAdminURL}>Copy admin URL</button>
-            <button class="primary-btn" on:click={() => (showSettings = false)}>Close</button>
+            <button class="btn primary" on:click={() => (showSettings = false)}>Close</button>
           </div>
         </div>
         <div class="modal-body">
-          <div class="endpoint-summary">
-            <div class="endpoint-line">
-              <span class="info-label">Admin</span>
-              <span class="info-value" title={adminURL}>{adminURL}</span>
-            </div>
-            <div class="endpoint-line">
-              <span class="info-label">Socket</span>
-              <span class="info-value">{serverHost}:{serverPort}</span>
-            </div>
-          </div>
-          <div class="settings-strip">
+          <div class="fields-row">
             <label class="field">
               <span>Host</span>
               <input bind:value={editHost} placeholder="127.0.0.1" on:keydown={handleKeydown} />
@@ -617,515 +443,360 @@
               <span>Port</span>
               <input bind:value={editPort} placeholder="1802" on:keydown={handleKeydown} />
             </label>
-            <div class="settings-actions">
-              <button class="primary-btn" on:click={applySettings}>Apply</button>
-              <button class="ghost-btn" on:click={openAdmin}>Open admin</button>
-            </div>
+          </div>
+          <div class="settings-actions">
+            <button class="btn primary" on:click={applySettings}>Apply & reconnect</button>
+            <button class="btn" on:click={openAdmin}>Open admin</button>
           </div>
         </div>
       </div>
     </div>
   {/if}
 
-  {#if showLogs}
-    <div class="overlay" role="button" tabindex="0" on:click={() => (showLogs = false)} on:keydown={(event) => {
-      if (event.key === "Escape" || event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        showLogs = false;
-      }
-    }}>
-      <div class="modal-sheet modal-sheet-wide" role="dialog" aria-modal="true" aria-label="Runtime logs" tabindex="-1" on:click|stopPropagation on:keydown|stopPropagation>
-        <div class="modal-head">
-          <div>
-            <div class="eyebrow">Runtime diagnostics</div>
-            <h2>Logs</h2>
-          </div>
-          <div class="modal-actions">
-            <button class="ghost-btn" on:click={() => (showTimeline = !showTimeline)}>
-              {showTimeline ? "Hide timeline" : "Show timeline"}
-            </button>
-            <button class="ghost-btn" on:click={() => (showDebug = !showDebug)}>
-              {showDebug ? "Hide debug" : "Show debug"}
-            </button>
-            <button class="primary-btn" on:click={() => (showLogs = false)}>Close</button>
-          </div>
-        </div>
-        <div class="modal-body logs-body">
-          <TimelinePanel {timelineEvents} {showTimeline} onToggle={() => (showTimeline = !showTimeline)} />
-          <DebugPanel {debugEvents} {showDebug} onToggle={() => (showDebug = !showDebug)} />
-        </div>
-      </div>
-    </div>
-  {/if}
 </div>
 
 <style>
-  :global(*) {
-    box-sizing: border-box;
-    margin: 0;
-    padding: 0;
-  }
+  :global(*) { box-sizing: border-box; margin: 0; padding: 0; }
 
   :global(body) {
     font-family: "Plus Jakarta Sans", Inter, "Segoe UI", system-ui, sans-serif;
     font-size: 12px;
-    color: #13304a;
+    color: #0f172a;
     height: 100vh;
-    background: #f7f9fc;
+    background: #edf1f8;
   }
 
   .shell {
     height: 100%;
     display: flex;
     flex-direction: column;
-    gap: 8px;
-    padding: 10px 12px;
-    background: #f7f9fc;
-  }
-
-  .console-bar,
-  .route-strip,
-  .action-strip,
-  .activity-shell {
-    border-radius: 16px;
-    border: 1px solid #dde5f0;
-    background: rgba(255, 255, 255, 0.96);
-  }
-
-  .console-bar {
-    padding: 12px 14px 10px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    align-items: stretch;
-  }
-
-  .console-title-row {
-    display: flex;
-    justify-content: space-between;
-    gap: 12px;
-    align-items: flex-start;
-  }
-
-  .console-title {
-    min-width: 0;
-  }
-
-  .console-status {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-
-  .mini-stat {
-    display: inline-flex;
-    align-items: center;
     gap: 6px;
-    padding: 7px 10px;
-    border-radius: 999px;
-    background: #eef4ff;
-    color: #274690;
-    font-size: 11px;
-    line-height: 1;
+    padding: 10px;
   }
 
-  .mini-stat strong {
-    color: #0f172a;
-    font-size: 12px;
-  }
-
-  .inline-badge {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 18px;
-    height: 18px;
-    padding: 0 5px;
-    border-radius: 999px;
-    background: #dce8ff;
-    color: #1d4ed8;
-    font-size: 10px;
-    font-weight: 700;
-  }
-
-  .eyebrow {
-    font-size: 10px;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    font-weight: 700;
-    color: #6b7b94;
-  }
-
-  h1 {
-    margin-top: 4px;
-    font-size: 18px;
-    line-height: 1.08;
-    letter-spacing: -0.03em;
-    color: #0f172a;
-  }
-
-  .route-strip {
-    padding: 10px 12px;
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    gap: 10px 14px;
-  }
-
-  .route-block {
-    min-width: 0;
+  /* ── Header card ── */
+  .header-card {
+    background: #fff;
+    border: 1px solid #dde5f0;
+    border-radius: 14px;
+    padding: 12px 12px 8px;
     display: flex;
     flex-direction: column;
     gap: 8px;
+    flex-shrink: 0;
   }
 
-  .route-block-right {
-    align-items: flex-start;
-  }
-
-  .route-kv {
-    min-width: 0;
+  .top-row {
     display: flex;
-    flex-direction: column;
-    gap: 3px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
   }
 
-  .route-label {
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: #7b8aa3;
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
   }
 
-  .route-name {
+  .brand-logo {
+    width: 28px;
+    height: 28px;
+    border-radius: 7px;
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+
+  .brand-name {
     font-size: 13px;
     font-weight: 700;
     color: #0f172a;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    letter-spacing: -0.01em;
     white-space: nowrap;
   }
 
-  .route-page {
-    font-size: 12px;
-    color: #64748b;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .route-default,
-  .route-active {
-    min-width: 0;
-    font-size: 12px;
-    color: #0f172a;
-    font-weight: 600;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .action-strip {
-    display: grid;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
-    gap: 8px;
-    padding: 8px;
-  }
-
-  .status-dot {
-    width: 9px;
-    height: 9px;
+  /* ── Status pill ── */
+  .status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 9px 4px 7px;
     border-radius: 999px;
-    background: #86efac;
-    box-shadow: 0 0 0 6px rgba(134, 239, 172, 0.14);
+    font-size: 11px;
+    font-weight: 700;
+    white-space: nowrap;
+    flex-shrink: 0;
+    background: rgba(74,222,128,0.14);
+    color: #15803d;
+  }
+  .status-pill.disconnected { background: rgba(251,113,133,0.14); color: #be123c; }
+  .status-pill.working      { background: rgba(96,165,250,0.14);  color: #1d4ed8; }
+
+  .sdot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: #4ade80;
+  }
+  .status-pill.disconnected .sdot { background: #fb7185; }
+  .status-pill.working      .sdot { background: #60a5fa; animation: pulse 1.1s ease-in-out infinite; }
+
+  @keyframes pulse {
+    0%,100% { opacity: 1; transform: scale(1); }
+    50%     { opacity: 0.35; transform: scale(0.6); }
   }
 
-  .status-pill.disconnected .status-dot {
-    background: #fda4af;
-    box-shadow: 0 0 0 6px rgba(253, 164, 175, 0.16);
-  }
-
-  .activity-shell {
+  /* ── Info rows ── */
+  .info-rows {
     display: flex;
     flex-direction: column;
-    min-height: 88px;
-    max-height: 140px;
+    gap: 2px;
     overflow: hidden;
   }
 
-  :global(.activity-shell .panel) {
-    border: 0;
-    border-radius: 0;
-    background: transparent;
-  }
-
-  .activity-shell-head {
+  .info-row-1 {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    padding: 10px 12px 6px;
-    font-size: 12px;
-    font-weight: 700;
-    color: #0f172a;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
   }
 
-  .panel-badge {
-    min-width: 24px;
-    height: 24px;
-    border-radius: 999px;
+  .info-row-2 {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    overflow: hidden;
+  }
+
+  .i-ep {
+    font-size: 10.5px;
+    font-family: "SF Mono", "Fira Mono", Consolas, monospace;
+    font-weight: 600;
+    color: #64748b;
+    white-space: nowrap;
+  }
+  .i-dot { font-size: 10px; color: #cbd5e1; flex-shrink: 0; }
+  .i-file {
+    font-size: 10.5px; font-weight: 600; color: #334155;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    min-width: 0; flex-shrink: 1;
+  }
+  .i-page {
+    font-size: 10.5px; color: #94a3b8;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    min-width: 0; flex-shrink: 2;
+  }
+
+  /* ── Selection row ── */
+  .sel-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    align-items: center;
+    padding-top: 2px;
+  }
+
+  .sel-empty {
+    font-size: 10.5px;
+    color: #94a3b8;
+    font-style: italic;
+  }
+
+  .sel-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 8px 3px 6px;
+    background: #f1f5f9;
+    border-radius: 6px;
+    max-width: 130px;
+    overflow: hidden;
+    cursor: default;
+  }
+
+  .sel-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .sel-name {
+    font-size: 10.5px;
+    font-weight: 500;
+    color: #475569;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+  }
+
+  .sel-more {
+    font-size: 10px;
+    font-weight: 700;
+    color: #64748b;
+    padding: 3px 6px;
+    background: #f1f5f9;
+    border-radius: 6px;
+    border: 1px solid #e2e8f0;
+    flex-shrink: 0;
+  }
+
+  /* ── Action row ── */
+  .action-row {
+    display: flex;
+    gap: 5px;
+    padding-top: 2px;
+  }
+
+  /* ── Buttons ── */
+  .btn {
+    flex: 1;
+    height: 32px;
+    padding: 0 10px;
+    border: none;
+    border-radius: 8px;
+    background: #f1f5fb;
+    color: #334268;
+    font-size: 11.5px;
+    font-weight: 700;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    font-size: 12px;
-    color: #1447e6;
-    background: rgba(20, 71, 230, 0.08);
-  }
-
-  .info-label {
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: #7b8aa3;
-  }
-
-  .ghost-btn,
-  .primary-btn {
-    border: 0;
+    gap: 4px;
     cursor: pointer;
-    transition: background 140ms ease, border-color 140ms ease;
+    font-family: inherit;
+    transition: background 100ms;
     min-width: 0;
   }
+  .btn:hover { background: #e4ecf8; }
+  .btn.primary { background: #0f6eff; color: #fff; flex: 0 0 auto; }
+  .btn.primary:hover { background: #0459d8; }
+  .btn.icon { flex: 0 0 32px; font-size: 13px; color: #64748b; }
 
-  .ghost-btn {
-    padding: 8px 10px;
-    border-radius: 10px;
-    background: #eff4fb;
-    color: #274690;
-    font-weight: 700;
+  .badge {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 14px; height: 14px; padding: 0 3px;
+    border-radius: 999px;
+    background: #dce8ff; color: #1d4ed8;
+    font-size: 9px; font-weight: 700;
   }
 
-  .primary-btn {
-    padding: 10px 12px;
-    border-radius: 10px;
-    background: #0f6eff;
-    color: white;
-    font-weight: 700;
-  }
-
-  .ghost-btn,
-  .primary-btn {
-    height: 36px;
-  }
-
-  .ghost-btn:hover,
-  .primary-btn:hover {
-    background: #e7eef8;
-  }
-
-  .primary-btn:hover {
-    background: #0459d8;
-  }
-
-  .overlay {
-    position: fixed;
-    inset: 0;
-    z-index: 20;
-    background: rgba(15, 23, 42, 0.22);
-    display: flex;
-    align-items: flex-end;
-    justify-content: center;
-    padding: 12px;
-  }
-
-  .modal-sheet {
-    width: min(100%, 520px);
-    max-height: min(78vh, 760px);
-    border-radius: 18px;
-    border: 1px solid #d7e0ec;
-    background: #ffffff;
+  /* ── Activity ── */
+  .activity-shell {
+    flex: 1;
+    min-height: 0;
+    background: #fff;
+    border: 1px solid #dde5f0;
+    border-radius: 14px;
     display: flex;
     flex-direction: column;
     overflow: hidden;
-    box-shadow: 0 20px 48px rgba(15, 23, 42, 0.18);
   }
 
-  .modal-sheet-wide {
-    width: min(100%, 720px);
+  .act-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px 4px;
+    font-size: 10px;
+    font-weight: 700;
+    color: #94a3b8;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    flex-shrink: 0;
+  }
+
+  .act-badge {
+    min-width: 20px; height: 20px;
+    border-radius: 999px;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 10.5px; color: #2563eb;
+    background: rgba(37,99,235,0.08);
+  }
+
+  :global(.activity-shell .panel) { border: 0; border-radius: 0; background: transparent; flex: 1; min-height: 0; }
+
+  /* ── Overlay ── */
+  .overlay {
+    position: fixed; inset: 0; z-index: 20;
+    background: rgba(15,23,42,0.22);
+    display: flex; align-items: flex-end; justify-content: center;
+    padding: 10px;
+  }
+
+  /* ── Modal ── */
+  .modal {
+    width: min(100%, 480px);
+    max-height: min(80vh, 640px);
+    border-radius: 16px;
+    border: 1px solid #d7e0ec;
+    background: #fff;
+    display: flex; flex-direction: column;
+    overflow: hidden;
+    box-shadow: 0 16px 48px rgba(15,23,42,0.16);
   }
 
   .modal-head {
     display: flex;
+    align-items: center;
     justify-content: space-between;
     gap: 12px;
-    align-items: flex-start;
-    padding: 14px 16px 10px;
-    border-bottom: 1px solid #e8eef6;
+    padding: 13px 14px 10px;
+    border-bottom: 1px solid #edf2f9;
+    flex-shrink: 0;
   }
 
-  h2 {
-    margin-top: 3px;
-    font-size: 18px;
+  .modal-title {
+    font-size: 14px;
+    font-weight: 700;
     color: #0f172a;
   }
 
   .modal-actions {
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-    justify-content: flex-end;
+    display: flex; gap: 6px; align-items: center;
   }
 
   .modal-body {
     min-height: 0;
-    display: flex;
-    flex-direction: column;
+    display: flex; flex-direction: column;
     gap: 10px;
     padding: 12px;
     overflow: auto;
     background: #f8fafc;
   }
 
-  .logs-body {
-    gap: 10px;
-  }
-
-  .endpoint-summary {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    padding-bottom: 10px;
-  }
-
-  .endpoint-line {
-    display: flex;
-    align-items: center;
+  /* ── Settings fields ── */
+  .fields-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
     gap: 8px;
   }
 
-  .settings-strip {
-    display: grid;
-    grid-template-columns: 1fr 1fr auto;
-    gap: 10px;
-    align-items: end;
-  }
-
   .field {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    min-width: 0;
+    display: flex; flex-direction: column; gap: 5px;
   }
-
   .field span {
-    font-size: 11px;
-    font-weight: 700;
-    color: #475569;
+    font-size: 10.5px; font-weight: 700; color: #64748b;
+    text-transform: uppercase; letter-spacing: 0.06em;
   }
-
   .field input {
-    width: 100%;
-    border: 1px solid rgba(191, 219, 254, 0.9);
-    border-radius: 14px;
-    padding: 11px 12px;
-    font: inherit;
-    color: #0f172a;
-    background: rgba(248, 250, 252, 0.96);
-    outline: none;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 8px 10px;
+    font: inherit; color: #0f172a;
+    background: #fff; outline: none;
   }
-
   .field input:focus {
-    border-color: rgba(37, 99, 235, 0.48);
-    box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.08);
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 3px rgba(59,130,246,0.1);
   }
 
-  .settings-actions {
-    display: flex;
-    gap: 10px;
-  }
+  .settings-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 
-  @media (max-width: 620px) {
-    .shell {
-      padding: 10px;
-      gap: 10px;
-    }
-
-    .console-title-row {
-      flex-direction: column;
-      align-items: flex-start;
-    }
-
-    h1 {
-      font-size: 16px;
-      max-width: none;
-    }
-
-    .console-status {
-      width: 100%;
-    }
-
-    .action-strip,
-    .settings-strip {
-      grid-template-columns: 1fr 1fr;
-    }
-
-    .route-strip {
-      grid-template-columns: 1fr;
-    }
-
-    .modal-head {
-      flex-direction: column;
-    }
-
-    .modal-actions {
-      width: 100%;
-      justify-content: flex-start;
-    }
-  }
-
-  @media (max-width: 440px) {
-    .shell {
-      padding: 8px;
-      gap: 8px;
-    }
-
-    .console-bar,
-    .route-strip,
-    .action-strip,
-    .activity-shell {
-      border-radius: 14px;
-    }
-
-    h1 {
-      font-size: 15px;
-    }
-
-    .eyebrow {
-      font-size: 9px;
-    }
-
-    .info-label {
-      font-size: 9px;
-    }
-
-    .route-default,
-    .route-active {
-      font-size: 11px;
-    }
-
-    .action-strip,
-    .settings-strip {
-      grid-template-columns: 1fr;
-    }
-
-    .ghost-btn,
-    .primary-btn {
-      width: 100%;
-      justify-content: center;
-      text-align: center;
-    }
+  /* ── Responsive ── */
+  @media (max-width: 380px) {
+    .shell { padding: 8px; gap: 5px; }
+    .header-card, .activity-shell { border-radius: 12px; }
+    .fields-row { grid-template-columns: 1fr; }
   }
 </style>
