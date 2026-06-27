@@ -1,4 +1,8 @@
-# za-talk-to-figma
+<p align="center">
+  <img src="assets/logo/icon.svg" width="80" height="80" alt="za-talk-to-figma">
+</p>
+
+<h1 align="center">za-talk-to-figma</h1>
 
 `za-talk-to-figma` is a local Figma execution runtime for AI workflows. It connects an MCP-compatible client to a live Figma file, applies runtime policies around heavy reads and fallbacks, and exposes both low-level capabilities and higher-level smart workflows.
 
