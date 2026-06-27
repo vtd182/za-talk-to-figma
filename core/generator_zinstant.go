@@ -619,25 +619,36 @@ func extractRadius(raw interface{}) float64 {
 	}
 }
 
-func extractPrimaryColor(raw interface{}) string {
-	switch v := raw.(type) {
-	case []interface{}:
-		if len(v) > 0 {
-			if s, ok := v[0].(string); ok {
-				return s
-			}
+func extractPrimaryColor(raw any) string {
+	items, ok := raw.([]any)
+	if !ok || len(items) == 0 {
+		return ""
+	}
+	first := items[0]
+	// New format: { "type": "SOLID", "color": "#rrggbb" }
+	if m, ok := first.(map[string]any); ok {
+		if c, ok := m["color"].(string); ok && strings.HasPrefix(c, "#") {
+			return c
 		}
-	case []string:
-		if len(v) > 0 {
-			return v[0]
-		}
-	case string:
-		if strings.HasPrefix(v, "#") {
-			return v
-		}
+	}
+	// Legacy format: plain hex string
+	if s, ok := first.(string); ok && strings.HasPrefix(s, "#") {
+		return s
 	}
 	return ""
 }
+
+// zinstantSkipIfExists lists files that are written only on first creation.
+// Re-running generate_zinstant will not overwrite them.
+var zinstantSkipIfExists = map[string]bool{
+	"package.json":  true,
+	"tsconfig.json": true,
+	"src/index.ts":  true,
+}
+
+// zinstantConfigSyncKeys are the only keys updated when zinstantconfig.json already exists.
+// All other keys (e.g. templateKey) are preserved from the existing file.
+var zinstantConfigSyncKeys = []string{"zhtmlFile", "bundleDataFile", "version"}
 
 func buildZinstantFiles(slug string, root *zEmitNode, bindings map[string]string, screenName string) map[string]string {
 	return map[string]string{
@@ -816,19 +827,52 @@ func writeGeneratedFiles(outputDir string, files map[string]string) error {
 		if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
 			return fmt.Errorf("mkdir %s: %w", filepath.Dir(fullPath), err)
 		}
-		f, err := os.OpenFile(fullPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
-		if err != nil {
-			return err
+
+		// Some files are only written on first creation; never overwritten.
+		if zinstantSkipIfExists[rel] {
+			if _, err := os.Stat(fullPath); err == nil {
+				continue
+			}
 		}
-		if _, err := f.WriteString(content); err != nil {
-			f.Close()
-			return err
+
+		// zinstantconfig.json: preserve existing keys, patch only sync keys.
+		if rel == "zinstantconfig.json" {
+			content = mergeZinstantConfig(fullPath, content)
 		}
-		if err := f.Close(); err != nil {
+
+		if err := os.WriteFile(fullPath, []byte(content), 0o644); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// mergeZinstantConfig reads an existing zinstantconfig.json and updates only
+// zinstantConfigSyncKeys from the generated content, preserving everything else
+// (notably templateKey). Returns generated verbatim when no existing file is found.
+func mergeZinstantConfig(path, generated string) string {
+	existing, err := os.ReadFile(path)
+	if err != nil {
+		return generated
+	}
+	var existingMap map[string]interface{}
+	if err := json.Unmarshal(existing, &existingMap); err != nil {
+		return generated
+	}
+	var generatedMap map[string]interface{}
+	if err := json.Unmarshal([]byte(generated), &generatedMap); err != nil {
+		return string(existing)
+	}
+	for _, key := range zinstantConfigSyncKeys {
+		if v, ok := generatedMap[key]; ok {
+			existingMap[key] = v
+		}
+	}
+	result, err := json.MarshalIndent(existingMap, "", "  ")
+	if err != nil {
+		return string(existing)
+	}
+	return string(result) + "\n"
 }
 
 func slugify(s string) string {
