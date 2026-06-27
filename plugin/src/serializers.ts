@@ -30,17 +30,42 @@ export const serializePaints = (paints: any) => {
   if (!paints || !Array.isArray(paints)) return undefined;
 
   const result = paints
-    .filter((paint: any) => paint.type === "SOLID" && "color" in paint)
+    .filter((paint: any) => paint.visible !== false)
     .map((paint: any) => {
-      const hex = toHex(paint.color);
-      const opacity = paint.opacity != null ? paint.opacity : 1;
-      if (opacity === 1) return hex;
-      return (
-        hex +
-        Math.round(opacity * 255)
-          .toString(16)
-          .padStart(2, "0")
-      );
+      const opacity = paint.opacity ?? 1;
+
+      if (paint.type === "SOLID") {
+        const entry: any = { type: "SOLID", color: toHex(paint.color) };
+        if (opacity !== 1) entry.opacity = Math.round(opacity * 100) / 100;
+        return entry;
+      }
+
+      if (typeof paint.type === "string" && paint.type.startsWith("GRADIENT_")) {
+        const entry: any = { type: paint.type };
+        if (opacity !== 1) entry.opacity = Math.round(opacity * 100) / 100;
+        if (Array.isArray(paint.gradientStops)) {
+          entry.gradientStops = paint.gradientStops.map((stop: any) => {
+            const s: any = {
+              position: Math.round(stop.position * 1000) / 1000,
+              color: toHex(stop.color),
+            };
+            if (stop.color?.a != null && stop.color.a !== 1)
+              s.colorOpacity = Math.round(stop.color.a * 100) / 100;
+            return s;
+          });
+        }
+        return entry;
+      }
+
+      if (paint.type === "IMAGE") {
+        const entry: any = { type: "IMAGE", scaleMode: paint.scaleMode };
+        if (opacity !== 1) entry.opacity = Math.round(opacity * 100) / 100;
+        return entry;
+      }
+
+      const entry: any = { type: paint.type ?? "UNKNOWN" };
+      if (opacity !== 1) entry.opacity = Math.round(opacity * 100) / 100;
+      return entry;
     });
 
   return result.length > 0 ? result : undefined;
@@ -93,6 +118,35 @@ export const serializeStyles = async (node: any) => {
       bottom: node.paddingBottom,
       left: node.paddingLeft,
     };
+  }
+
+  if ("effects" in node && Array.isArray(node.effects) && node.effects.length > 0) {
+    if (node.effectStyleId && typeof node.effectStyleId === "string") {
+      const style = await figma.getStyleByIdAsync(node.effectStyleId);
+      if (style) styles.effectStyle = style.name;
+    }
+    const effects = node.effects
+      .filter((e: any) => e.visible !== false)
+      .map((e: any) => {
+        if (e.type === "DROP_SHADOW" || e.type === "INNER_SHADOW") {
+          const entry: any = {
+            type: e.type,
+            color: toHex(e.color),
+            offset: { x: pixelRound(e.offset?.x ?? 0), y: pixelRound(e.offset?.y ?? 0) },
+            radius: e.radius,
+          };
+          if (e.color?.a != null && e.color.a !== 1)
+            entry.colorOpacity = Math.round(e.color.a * 100) / 100;
+          if (e.spread != null && e.spread !== 0) entry.spread = e.spread;
+          if (e.blendMode && e.blendMode !== "NORMAL") entry.blendMode = e.blendMode;
+          return entry;
+        }
+        if (e.type === "LAYER_BLUR" || e.type === "BACKGROUND_BLUR") {
+          return { type: e.type, radius: e.radius };
+        }
+        return { type: e.type };
+      });
+    if (effects.length > 0) styles.effects = effects;
   }
 
   return styles;
