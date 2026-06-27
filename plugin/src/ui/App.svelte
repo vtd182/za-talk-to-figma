@@ -158,7 +158,9 @@
           return;
         }
 
-        if (payload.requestId) ensureActiveRequest(payload.requestId, payload.type ?? "tool");
+        if (payload.requestId && payload.type !== "execution_report") {
+          ensureActiveRequest(payload.requestId, payload.type ?? "tool");
+        }
         parent.postMessage({ pluginMessage: { type: "server-request", payload } }, "*");
       } catch { /* malformed frame */ }
     };
@@ -218,6 +220,11 @@
       entry.message = msg.message ?? "Running";
       reassignRequests();
       if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(msg));
+      return;
+    }
+
+    if (msg.type === "execution_report") {
+      // Telemetry-only — do not create activity entries or relay to server
       return;
     }
 
